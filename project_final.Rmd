@@ -1,0 +1,214 @@
+---
+title: "Predicting Exercising manner with classification methods"
+subtitle: "Final Project for Practical Machine Learning"
+author: "Hui-yu Yang"
+date: "July 23, 2015"
+output: html_document
+---
+
+### Study Background
+
+Majority of the attention in human activity recognition research focuses on discrimination between different type of activities, but not quality of the activities. In this study, the goal is to investigate how well an activity was performed by six wearers of electronic devices. These six participants were between 20 to 28 years with little weight lifting experience. They were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions, namely
+
+- **Class A**: exactly according to the specification
+- **Class B**: throwing the elbows to the front
+- **Class C**: lifting the dumbbell only halfway
+- **Class D**: lowering the dumbbell only half way
+- **Class E**: throwing the hips to the front. 
+
+Notice that only class A corresponds to the specified execution of the exercise, and others correspond to common mistakes. To ensure the quality of data, an experienced weight lifter was there to supervise the participants. 
+More information is available from the website [here](http://groupware.les.inf.puc-rio.br/har).
+
+### Project Goal
+
+The goal of this project is to predict the manner in which the participants did the exercise. In other words, we need to predict the different fashions of the Unilateral Dumbbell Biceps crul performed by the participants. It is the *classe* varaible in the dataset, and we can use any of the other variables to predict with. 
+
+### Data Processing
+
+```{r, message=F, warning=F}
+## Load packages necessary
+library(knitr)
+library(caret)
+library(randomForest)
+library(rpart)
+library(rattle)
+library(Hmisc)
+library(plyr)
+
+## set directory 
+setwd("C:/Users/Moo/Documents/Coursera/Data Science Specialization/8. Practical Machine Learning/project")
+
+# download data
+if(!file.exists("./training.csv")){
+  url.training <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  download.file(url.training, destfile = "./training.csv")
+}
+
+if(!file.exists("./testing.csv")){
+  url.testing <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  download.file(url.training, destfile = "./testing.csv")
+}
+
+## load data
+training <- read.csv("./training.csv", na.strings=c("NA",""),stringsAsFactors = FALSE)
+testing <- read.csv("./pml-testing.csv", na.strings=c("NA",""),stringsAsFactors = FALSE)
+```
+
+After loading the libraries, the data files were downloaded if they don't exist in the directory. The training dataset contains 160 variables with 19622 observations, and the testing dataset contains 20 observations to test the performance of prediction of the classification model. 
+
+### Data Cleaning 
+
+```{r dataCleaning}
+## data cleaning 
+index.for.undefined <- sapply(training, function(x) x=="#DIV/0!")
+training[index.for.undefined] <- NA
+
+# convert yes/no into 1/0
+testing$new_window = 1*(testing$new_window=="yes")
+testing$new_window <- as.factor(testing$new_window)
+
+training$new_window = 1*(training$new_window=="yes")
+training$new_window <- as.factor(training$new_window)
+training$classe <- factor(training$classe)
+
+## Removing variables
+# remove variables with either 0 or NA 
+unwanted <- names(training) %in% c("kurtosis_yaw_belt", "kurtosis_yaw_dumbbell", "kurtosis_yaw_forearm",
+                                   "skewness_yaw_belt", "skewness_yaw_dumbbell", "skewness_yaw_forearm",
+                                  "amplitude_yaw_belt", "amplitude_yaw_dumbbell", "amplitude_yaw_forearm")
+training.new <- training[!unwanted]
+#summary(training.new)
+
+# remove unrelevant variables 
+unwanted.2 <- names(training.new) %in% c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2",
+                                         "cvtd_timestamp") 
+training.new <- training.new[!unwanted.2]
+#summary(training.new)
+
+# remove variables that's mostly NA's (> 95%) 
+index.NA <- sapply(training.new, is.na)
+Sum.NA <- colSums(index.NA)
+percent.NA <- Sum.NA/(dim(training.new)[1])
+to.remove <- percent.NA>.95
+training.small <- training.new[,!to.remove]
+```
+
+We first converted "#DIV/0" strings to NA, then the yes/no category in new_window variable is converted to 1/0. The second part is likely to be unnecessary since it will be impliticly convert to 1/0 in the model, but I did it anyways. The outcome variable classe is a character varaible due to how the data was read, so it was converted to a factor variable. 
+
+There were 9 variables consist of only 0 or NA, namely, *kurtosis_yaw_belt*, *kurtosis_yaw_dumbbell*, *kurtosis_yaw_forearm*, *skewness_yaw_belt*, *skewness_yaw_dumbbell*, *skewness_yaw_forearm*, *amplitude_yaw_belt*, *amplitude_yaw_dumbbell*, and *amplitude_yaw_forearm*. We know those variables will not help in terms of classification, so they were removed. In addition, the X variable is just sequence from 1 to 19622. The user_name variable consists of the names of the participants, and there are three variables for indicating the date/time of when the activity was performed. We hope that these time variables will not contribute to the classification, and the user name definitely shouldn't. In that case, all of the varibles above were removed from the dataset.  
+
+There were 91 variables with more than 95% of the data missing. Those variables were removed from the data as well. If we built a classification model based on those variables, then we can expect most of the time the varible is missing and therefore we cannot apply the classification rules on them. Therefore, building a model based on variables that's mostly missing is not practical. 
+
+### Data Partitioning
+
+```{r dataPartitioning}
+# Data Partitioning- training/testing 
+set.seed(10)
+n <- length(training.small)
+inTrain = createDataPartition(training.small$classe, p = 0.6)[[1]]
+training.smaller <- training.small[inTrain,]
+testing.smaller <- training.small[-inTrain,]
+#summary(training.smaller)
+```
+
+Since the testing data doesn't consist of the actual classe varaible, we cannot predict the performance of the classification model. Therefore, the training data was splitted up- 60% became the training data, and 40% became the testing data. 
+
+### Model Building
+
+#### Regression Tree
+
+```{r regressionTree}
+
+## For the last model:
+
+# setting option for 10-fold CV
+train_control <- trainControl(method="cv", number=10)
+
+# fit the model 
+set.seed(100)
+modelFit1 <- train(classe ~., method="rpart", data=training.smaller, 
+                  trControl = train_control)
+result1<- confusionMatrix(testing.smaller$classe, predict(modelFit1, newdata=testing.smaller))
+
+# fit the model after preprocessing 
+modelFit2 <- train(classe ~., method="rpart", preProcess=c("center", "scale"),data=training.smaller, 
+                  trControl = train_control)
+result2<- confusionMatrix(testing.smaller$classe, predict(modelFit2, newdata=testing.smaller))
+
+result1
+result2
+```
+
+The accuracies of the two models using regression tree isn't good at all. The accuracy is only around 50%, which is not acceptable. Preprocessing the data didn't help the performance of regression tree based predictions, so we'll try a random forest next. 
+
+#### Random Forest 
+
+```{r randomForest}
+
+# Get correlation matrix and find the variables with high correlation with classe
+k <- training.small
+k$classe <- as.numeric(training.small$classe)
+cormatrix <- data.frame(cor(k[,-c(1)]))
+cormatrix$name <- names(k[2:55])
+t <- data.frame(cbind(cormatrix$classe, cormatrix$name))
+names(t) <- c("cor", "name")
+
+# show variables with highest correlation with classe
+tail(arrange(t,cor),8)
+
+# try model with variable with highest corr with classe
+modelFit3 <- randomForest(classe ~pitch_forearm+magnet_arm_x+accel_arm_x+  total_accel_forearm+magnet_dumbbell_z+accel_dumbbell_x, data=training.smaller)
+result3 <- confusionMatrix(testing.smaller$classe, predict(modelFit3, newdata=testing.smaller))
+
+# try full model 
+modelFit4 <- randomForest(classe ~., data=training.smaller)
+result4<- confusionMatrix(testing.smaller$classe, predict(modelFit4, newdata=testing.smaller))
+
+result3
+result4
+```
+
+Random forest requires more computation time, so it's wiser to get a list of variables that's more likely to predict classe well and see how the model performs first. If we predict the classe with the variables that correlates with classe the most (r> 0.1), we get a classification model with accuracy of `r round(result3$overall[1],3)` if we apply it on the testing set. This is fairly good since the prediction only depends on 6 variables. The model considering all of the variables after dimension reduction/data cleaning earlier has a accuracy of `r round(result4$overall[1],3)`, which is even better.  
+
+### Cross Validation
+
+```{r crossValidation}
+
+# cross validation (10-fold cross validation--> split data into 10 partitions, run the classifier for 10 times)
+set.seed(100)
+k=10
+parts <- split(training.small,f = rep_len(1:k, nrow(training.small) ))
+
+# make a help function to combine the list of 10 equal size data
+combinedata <- function(index){
+  data <- parts[[index[1]]]
+  for (i in 2:(length(index))) data <- rbind(data, parts[[index[i]]])
+  data
+}
+
+# set empty matrix to store result
+cross.validation.result <- as.data.frame(matrix(nrow=7, ncol=k))
+
+index <- 1:10
+
+for (i in 1:10){
+  currentdata <- combinedata(index[index!= i])
+  model <- randomForest(classe~., data=currentdata)
+  result <- confusionMatrix(parts[[i]]$classe, predict(model, newdata=parts[[i]]))
+  cross.validation.result[,i] <- result$overall
+}
+```
+
+For the purpose of prediction, the model with higher accuracy was selected. Unlike regression models with a goal of association, the goal for classification here is prediction. Therefore, we should use the model with highest accuracy. 
+
+For cross validation, a 10-fold cross validation was performed. The training data was randomly splitted into 10 parts, and each of the 10 parts was the testing set, and the other 9 parts were the training set. After the loop runs 10 times, we will get the average accuracy on how the model performed on the testing sets. Based on the result based, the average accuracy was `r round(rowMeans(cross.validation.result)[1],3)` and the average kappa was `r round(rowMeans(cross.validation.result)[2],3)` , which are fairly high. 
+
+### Expected Out of Sample Error
+
+The out of sample error is just the error rate that we get when we apply the classification model on a new data set. Therefore, it was just the error rate from the 10-fold cross validation samples. In that case, the errors are `r round(1-cross.validation.result[1,1],3)`, `r round(1-cross.validation.result[1,2],3)`, `r round(1-cross.validation.result[1,3],3)`, `r round(1-cross.validation.result[1,4],3)`, `r round(1-cross.validation.result[1,5],3)`, `r round(1-cross.validation.result[1,6],3)`, `r round(1-cross.validation.result[1,7],3)`, `r round(1-cross.validation.result[1,8],3)`, `r round(1-cross.validation.result[1,9],3)`, `r round(1-cross.validation.result[1,10],3)`. If we take an average of those out of sample error, we get an average out of sample error rate of 0.003. Therefore, we can expect the out of sample error for other testing sets to be 0.3%. 
+
+### Conclusion
+
+Without comparing the out of sample error rates, we can simply tell the Random forest classification technique works better than a regression tree in this case. The results that was obtained by using random forest technique were highly accurate on the testing set. The model was applied on the 20 different test cases, and the model that was built with 6 variables that's highly correlated with classe and the full model both produce identical results. 
+
+Even though random forest is more accurate, it does take longer to run. The future step is to explore parallel computing and see if there are any techniques that can speed up the computation time. 
